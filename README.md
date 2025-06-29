@@ -62,7 +62,7 @@ A NoneBot2 plugin for AWS management.
             "Resource": "arn:aws:ec2:*:*:instance/*",
             "Condition": {
                 "StringEquals": {
-                    "ec2:ResourceTag/ManagedBy": "nonebot-plugin-aws"
+                    "ec2:ResourceTag/ManagedBy": "nonebot-plugin-awsmgmt"
                 }
             }
         },

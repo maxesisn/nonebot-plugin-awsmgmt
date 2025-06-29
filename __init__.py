@@ -30,6 +30,8 @@ __plugin_meta__ = PluginMetadata(
         "--- Cost ---\n"
         "/aws_cost today|month|month by_service"
     ),
+    type="application",
+    homepage=""
     config=Config,
 )
 
