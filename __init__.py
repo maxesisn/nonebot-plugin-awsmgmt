@@ -31,7 +31,7 @@ __plugin_meta__ = PluginMetadata(
         "/aws_cost today|month|month by_service"
     ),
     type="application",
-    homepage=""
+    homepage="https://github.com/maxesisn/nonebot-plugin-awsmgmt",
     config=Config,
 )
 

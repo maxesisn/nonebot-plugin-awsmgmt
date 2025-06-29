@@ -63,23 +63,17 @@ jmespath==1.0.1
     # via botocore
 loguru==0.7.3
     # via nonebot2
-msgpack==1.1.1
-    # via nonebot-adapter-onebot
 multidict==6.6.2
     # via aiobotocore
     # via aiohttp
     # via yarl
-nonebot-adapter-onebot==2.4.6
-    # via nonebot-plugin-awsmgmt
 nonebot2==2.4.2
-    # via nonebot-adapter-onebot
     # via nonebot-plugin-awsmgmt
 propcache==0.3.2
     # via aiohttp
     # via yarl
 pydantic==2.11.7
     # via fastapi
-    # via nonebot-adapter-onebot
     # via nonebot2
 pydantic-core==2.33.2
     # via pydantic
@@ -108,7 +102,6 @@ typing-extensions==4.14.0
     # via exceptiongroup
     # via fastapi
     # via multidict
-    # via nonebot-adapter-onebot
     # via nonebot2
     # via pydantic
     # via pydantic-core
