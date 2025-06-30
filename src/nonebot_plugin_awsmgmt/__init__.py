@@ -133,7 +133,6 @@ async def ec2_operation(matcher: Matcher, args: Message, operation: str):
     await op_func(instance_ids)
 
     if waiter_name:
-        await matcher.send("Waiting for them to be " + ("rebooted" if operation == "reboot" else f"{target_status}..."))
         start_time = time.time()
         async with ec2_manager.session.client("ec2") as ec2:
             waiter = ec2.get_waiter(waiter_name)
