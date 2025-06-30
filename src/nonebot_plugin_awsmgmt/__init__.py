@@ -103,6 +103,62 @@ def format_ec2_status(instance: Dict[str, Any]) -> str:
 
 # --- EC2 Handlers --- #
 
+async def ec2_operation(matcher: Matcher, args: Message, operation: str):
+    """Helper function to handle EC2 start, stop, and reboot operations."""
+    target_type, value1, value2 = await parse_ec2_target(matcher, args)
+
+    states_map = {
+        "start": (["stopped"], "running", "start_instances", "instance_running"),
+        "stop": (["running"], "stopped", "stop_instances", "instance_stopped"),
+        "reboot": (["running"], "running", "reboot_instances", None), # Reboot does not have a waiter
+    }
+
+    if operation not in states_map:
+        await matcher.finish("Invalid operation.")
+
+    states, target_status, op_func_name, waiter_name = states_map[operation]
+
+    if target_type == "tag":
+        instances = await ec2_manager.get_instances_by_tag(value1, value2, states=states)
+    else:
+        instances = await ec2_manager.get_instances_by_id([value1], states=states)
+
+    if not instances:
+        await matcher.finish(f"No instances to {operation}.")
+
+    instance_ids = [inst['InstanceId'] for inst in instances]
+    await matcher.send(f"Sending {operation} command to instances:\n" + "\n".join(instance_ids))
+
+    op_func = getattr(ec2_manager, op_func_name)
+    await op_func(instance_ids)
+
+    if waiter_name:
+        await matcher.send("Waiting for them to be " + ("rebooted" if operation == "reboot" else f"{target_status}..."))
+        start_time = time.time()
+        async with ec2_manager.session.client("ec2") as ec2:
+            waiter = ec2.get_waiter(waiter_name)
+            await waiter.wait(InstanceIds=instance_ids)
+        elapsed_time = time.time() - start_time
+        await matcher.finish(f"Successfully {operation}ed instances in {elapsed_time:.2f} seconds.")
+    else: # For reboot
+        await matcher.finish(f"Successfully sent reboot command to instances.")
+
+
+@ec2_start_matcher.handle()
+@handle_non_finish_exceptions("An error occurred while starting EC2 instances.")
+async def handle_ec2_start(matcher: Matcher, args: Message = CommandArg()):
+    await ec2_operation(matcher, args, "start")
+
+@ec2_stop_matcher.handle()
+@handle_non_finish_exceptions("An error occurred while stopping EC2 instances.")
+async def handle_ec2_stop(matcher: Matcher, args: Message = CommandArg()):
+    await ec2_operation(matcher, args, "stop")
+
+@ec2_reboot_matcher.handle()
+@handle_non_finish_exceptions("An error occurred while rebooting EC2 instances.")
+async def handle_ec2_reboot(matcher: Matcher, args: Message = CommandArg()):
+    await ec2_operation(matcher, args, "reboot")
+
 @ec2_status_matcher.handle()
 @handle_non_finish_exceptions("An error occurred while fetching EC2 status.")
 async def handle_ec2_status(matcher: Matcher, args: Message = CommandArg()):
@@ -122,6 +178,7 @@ async def handle_ec2_status(matcher: Matcher, args: Message = CommandArg()):
 
 
 # --- Lightsail Handlers ---
+
 
 @lightsail_list_matcher.handle()
 @handle_non_finish_exceptions("An error occurred listing Lightsail instances.")

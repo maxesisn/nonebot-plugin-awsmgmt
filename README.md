@@ -1,8 +1,35 @@
 # nonebot_plugin_awsmgmt
 
-A NoneBot2 plugin for AWS management.
+一个用于 AWS 管理的 NoneBot2 插件。
 
 ## 使用方法
+
+---
+### EC2
+- `/ec2_start [target]`
+- `/ec2_stop [target]`
+- `/ec2_reboot [target]`
+- `/ec2_status [target]`
+
+**Target (目标):**
+- `tag:Key:Value`:  例如 `tag:Project:MyProject`
+- `id:i-xxxx`: 例如 `id:i-0fd0acc80b595ac71`
+
+如果未提供 `target`，插件将使用您在配置中设置的 `aws_default_target_tag`（如果已设置）。
+
+---
+### Lightsail
+- `/lightsail_list`
+- `/lightsail_start <实例名称>`
+- `/lightsail_stop <实例名称>`
+
+---
+### Cost Explorer (成本管理器)
+- `/aws_cost today` (今日成本)
+- `/aws_cost month` (本月成本)
+- `/aws_cost month by_service` (按服务划分的本月成本)
+
+## 安装
 
 1.  **安装插件**
 
@@ -23,12 +50,12 @@ A NoneBot2 plugin for AWS management.
 
 3.  **配置 AWS 凭证**
 
-    在 NoneBot2 项目的 `.env` 文件中配置 AWS 访问密钥和秘密访问密钥：
+    在您的 NoneBot2 项目的 `.env` 文件中配置您的 AWS 访问密钥和秘密访问密钥：
 
     ```
     AWS_ACCESS_KEY_ID=YOUR_AWS_ACCESS_KEY_ID
     AWS_SECRET_ACCESS_KEY=YOUR_AWS_SECRET_ACCESS_KEY
-    AWS_REGION_NAME=your-aws-region # 例如：us-east-1
+    AWS_REGION_NAME=your-aws-region # 例如: us-east-1
     ```
 
 ## AWS 侧配置
