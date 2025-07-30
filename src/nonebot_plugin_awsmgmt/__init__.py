@@ -44,6 +44,7 @@ __plugin_meta__ = PluginMetadata(
     type="application",
     homepage="https://github.com/maxesisn/nonebot-plugin-awsmgmt",
     config=Config,
+    supported_adapters=None
 )
 
 def handle_non_finish_exceptions(error_message: str):

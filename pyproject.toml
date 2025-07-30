@@ -6,7 +6,7 @@ authors = [
     { name = "Maximilian Wu", email = "me@maxng.cc" }
 ]
 dependencies = [
-    "nonebot2[fastapi]>=2.4.2",
+    "nonebot2>=2.4.2",
     "aioboto3>=15.0.0",
     "nonebot-plugin-apscheduler>=0.4.0",
 ]
