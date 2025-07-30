@@ -2,20 +2,26 @@ import time
 import re
 from typing import Tuple, List, Optional, Dict, Any
 from functools import wraps
+from datetime import datetime, timedelta
 
-from nonebot import on_command
+from nonebot import on_command, require, get_bot
 from nonebot.matcher import Matcher
 from nonebot.permission import SUPERUSER
 from nonebot.plugin import PluginMetadata, get_plugin_config
 from nonebot.params import CommandArg
-from nonebot.adapters import Message
+from nonebot.adapters import Message, Bot
 from nonebot.log import logger
 from nonebot.exception import FinishedException
+
+# 导入 APScheduler
+require("nonebot_plugin_apscheduler")
+from nonebot_plugin_apscheduler import scheduler
 
 from .config import Config
 from .ec2_manager import EC2Manager
 from .cost_explorer_manager import CostExplorerManager
 from .lightsail_manager import LightsailManager
+from .schedule_manager import ScheduleManager, EC2Schedule, ScheduleState
 
 __plugin_meta__ = PluginMetadata(
     name="AWS Manager",
@@ -24,6 +30,11 @@ __plugin_meta__ = PluginMetadata(
         "--- EC2 ---\n"
         "/ec2_start|stop|reboot|status [target]\n"
         "Target: tag:Key:Value | id:i-xxxx\n"
+        "--- EC2 Schedule ---\n"
+        "/ec2_schedule_set <target> <start_time> <stop_time>\n"
+        "/ec2_schedule_list\n"
+        "/ec2_schedule_remove <target>\n"
+        "Time format: HH:MM (24-hour)\n"
         "--- Lightsail ---\n"
         "/lightsail_list\n"
         "/lightsail_start|stop <instance_name>\n"
@@ -56,6 +67,7 @@ plugin_config = get_plugin_config(Config)
 ec2_manager = EC2Manager(plugin_config)
 cost_manager = CostExplorerManager(plugin_config)
 lightsail_manager = LightsailManager(plugin_config)
+schedule_manager = ScheduleManager()
 
 # --- Command Matchers --- #
 # EC2
@@ -63,6 +75,10 @@ ec2_start_matcher = on_command("ec2_start", aliases={"ec2启动"}, permission=SU
 ec2_stop_matcher = on_command("ec2_stop", aliases={"ec2停止"}, permission=SUPERUSER)
 ec2_reboot_matcher = on_command("ec2_reboot", aliases={"ec2重启"}, permission=SUPERUSER)
 ec2_status_matcher = on_command("ec2_status", aliases={"ec2状态"}, permission=SUPERUSER)
+# EC2 Schedule
+ec2_schedule_set_matcher = on_command("ec2_schedule_set", aliases={"ec2定时设置"}, permission=SUPERUSER)
+ec2_schedule_list_matcher = on_command("ec2_schedule_list", aliases={"ec2定时列表"}, permission=SUPERUSER)
+ec2_schedule_remove_matcher = on_command("ec2_schedule_remove", aliases={"ec2定时删除"}, permission=SUPERUSER)
 # Lightsail
 lightsail_list_matcher = on_command("lightsail_list", permission=SUPERUSER)
 lightsail_start_matcher = on_command("lightsail_start", permission=SUPERUSER)
@@ -131,6 +147,13 @@ async def ec2_operation(matcher: Matcher, args: Message, operation: str):
 
     op_func = getattr(ec2_manager, op_func_name)
     await op_func(instance_ids)
+
+    # 更新调度状态
+    for instance_id in instance_ids:
+        if operation == "stop":
+            schedule_manager.suspend_schedule_if_needed(instance_id, operation)
+        elif operation in ["start", "reboot"]:
+            schedule_manager.resume_schedule_if_needed(instance_id, operation)
 
     if waiter_name:
         start_time = time.time()
@@ -243,3 +266,240 @@ async def handle_cost(matcher: Matcher, args: Message = CommandArg()):
         await matcher.finish("\n".join(lines))
     else:
         await matcher.finish("Invalid cost command. Use: today, month, month by_service")
+
+
+# --- EC2 Schedule Handlers ---
+
+async def parse_schedule_target(matcher: Matcher, args: Message) -> Tuple[str, str, Optional[str]]:
+    """解析调度目标参数"""
+    return await parse_ec2_target(matcher, args)
+
+async def get_instance_id_from_target(target_type: str, value1: str, value2: Optional[str]) -> Optional[str]:
+    """从目标参数获取实例ID"""
+    if target_type == "tag":
+        instances = await ec2_manager.get_instances_by_tag(value1, value2, states=['pending', 'running', 'stopping', 'stopped'])
+        if instances:
+            return instances[0]['InstanceId']  # 取第一个匹配的实例
+    else:
+        instances = await ec2_manager.get_instances_by_id([value1], states=['pending', 'running', 'stopping', 'stopped'])
+        if instances:
+            return instances[0]['InstanceId']
+    return None
+
+@ec2_schedule_set_matcher.handle()
+@handle_non_finish_exceptions("An error occurred while setting EC2 schedule.")
+async def handle_ec2_schedule_set(matcher: Matcher, args: Message = CommandArg()):
+    arg_str = args.extract_plain_text().strip()
+    parts = arg_str.split()
+    
+    if len(parts) != 3:
+        await matcher.finish("Usage: /ec2_schedule_set <target> <start_time> <stop_time>\nExample: /ec2_schedule_set tag:Name:MyServer 08:00 22:00")
+    
+    target_str, start_time, stop_time = parts
+    
+    # 解析目标
+    try:
+        target_type, value1, value2 = "", "", None
+        match = re.match(r"^(tag|id):(.*)$", target_str)
+        if not match:
+            await matcher.finish("Invalid target format. Use tag:Key:Value or id:i-xxxx")
+        target_type, value = match.groups()
+        if target_type == "tag":
+            if ":" not in value:
+                await matcher.finish("Invalid tag format. Expected Key:Value")
+            value1, value2 = value.split(":", 1)
+        else:
+            value1 = value
+    except Exception:
+        await matcher.finish("Invalid target format. Use tag:Key:Value or id:i-xxxx")
+    
+    # 验证时间格式
+    try:
+        schedule_manager.parse_time_range(start_time)
+        schedule_manager.parse_time_range(stop_time)
+    except ValueError as e:
+        await matcher.finish(f"Invalid time format: {e}")
+    
+    # 获取实例ID
+    instance_id = await get_instance_id_from_target(target_type, value1, value2)
+    if not instance_id:
+        await matcher.finish("No EC2 instances found for the specified target.")
+    
+    # 创建调度
+    schedule = EC2Schedule(
+        instance_id=instance_id,
+        target_type=target_type,
+        target_key=value1,
+        target_value=value2 if value2 else value1,
+        start_time=start_time,
+        stop_time=stop_time
+    )
+    
+    # 添加到调度管理器
+    schedule_manager.add_schedule(schedule)
+    
+    # 添加定时任务
+    setup_schedule_jobs(schedule)
+    
+    await matcher.finish(f"Successfully set schedule for instance {instance_id}:\nStart: {start_time}, Stop: {stop_time}")
+
+@ec2_schedule_list_matcher.handle()
+@handle_non_finish_exceptions("An error occurred while listing EC2 schedules.")
+async def handle_ec2_schedule_list(matcher: Matcher):
+    schedules = schedule_manager.get_all_schedules()
+    if not schedules:
+        await matcher.finish("No EC2 schedules found.")
+    
+    lines = ["EC2 Schedules:"]
+    for schedule in schedules:
+        status = "🟢 Active" if schedule.state == ScheduleState.ACTIVE.value else "🔴 Suspended"
+        target_info = f"{schedule.target_key}:{schedule.target_value}" if schedule.target_type == "tag" else schedule.target_value
+        lines.append(f"- {schedule.instance_id} ({target_info})")
+        lines.append(f"  Start: {schedule.start_time}, Stop: {schedule.stop_time}")
+        lines.append(f"  Status: {status}")
+        if schedule.last_manual_action and schedule.last_manual_time:
+            last_time = datetime.fromisoformat(schedule.last_manual_time).strftime("%Y-%m-%d %H:%M")
+            lines.append(f"  Last manual action: {schedule.last_manual_action} at {last_time}")
+        lines.append("")
+    
+    await matcher.finish("\n".join(lines))
+
+@ec2_schedule_remove_matcher.handle()
+@handle_non_finish_exceptions("An error occurred while removing EC2 schedule.")
+async def handle_ec2_schedule_remove(matcher: Matcher, args: Message = CommandArg()):
+    target_type, value1, value2 = await parse_schedule_target(matcher, args)
+    
+    # 获取实例ID
+    instance_id = await get_instance_id_from_target(target_type, value1, value2)
+    if not instance_id:
+        await matcher.finish("No EC2 instances found for the specified target.")
+    
+    # 检查调度是否存在
+    schedule = schedule_manager.get_schedule(instance_id)
+    if not schedule:
+        await matcher.finish(f"No schedule found for instance {instance_id}.")
+    
+    # 删除调度
+    if schedule_manager.remove_schedule(instance_id):
+        # 移除定时任务
+        remove_schedule_jobs(instance_id)
+        await matcher.finish(f"Successfully removed schedule for instance {instance_id}.")
+    else:
+        await matcher.finish(f"Failed to remove schedule for instance {instance_id}.")
+
+
+# --- Scheduled Job Functions ---
+
+def setup_schedule_jobs(schedule: EC2Schedule):
+    """设置单个实例的定时任务"""
+    instance_id = schedule.instance_id
+    
+    # 移除旧任务（如果存在）
+    remove_schedule_jobs(instance_id)
+    
+    # 解析时间
+    start_hour, start_minute = schedule_manager.parse_time_range(schedule.start_time)
+    stop_hour, stop_minute = schedule_manager.parse_time_range(schedule.stop_time)
+    
+    # 添加启动任务
+    scheduler.add_job(
+        auto_start_instance,
+        "cron",
+        hour=start_hour,
+        minute=start_minute,
+        id=f"start_{instance_id}",
+        args=[instance_id],
+        replace_existing=True
+    )
+    
+    # 添加停止任务
+    scheduler.add_job(
+        auto_stop_instance,
+        "cron",
+        hour=stop_hour,
+        minute=stop_minute,
+        id=f"stop_{instance_id}",
+        args=[instance_id],
+        replace_existing=True
+    )
+
+def remove_schedule_jobs(instance_id: str):
+    """移除实例的所有定时任务"""
+    job_ids = [
+        f"start_{instance_id}",
+        f"stop_{instance_id}",
+        f"notify_start_{instance_id}",
+        f"notify_stop_{instance_id}"
+    ]
+    
+    for job_id in job_ids:
+        try:
+            scheduler.remove_job(job_id)
+        except Exception:
+            pass  # 任务可能不存在
+
+async def auto_start_instance(instance_id: str):
+    """自动启动实例"""
+    try:
+        schedule = schedule_manager.get_schedule(instance_id)
+        if not schedule:
+            logger.warning(f"No schedule found for instance {instance_id}")
+            return
+        
+        # 获取当前实例状态
+        instances = await ec2_manager.get_instances_by_id([instance_id], states=['pending', 'running', 'stopping', 'stopped'])
+        if not instances:
+            logger.warning(f"Instance {instance_id} not found")
+            return
+        
+        current_state = instances[0]['State']['Name']
+        
+        # 检查是否应该启动
+        if schedule_manager.should_auto_start(schedule, current_state):
+            await ec2_manager.start_instances([instance_id])
+            logger.info(f"Auto-started instance {instance_id}")
+        else:
+            logger.info(f"Skipped auto-start for instance {instance_id} (state: {current_state}, schedule state: {schedule.state})")
+            
+    except Exception as e:
+        logger.error(f"Error in auto_start_instance for {instance_id}: {e}")
+
+async def auto_stop_instance(instance_id: str):
+    """自动停止实例"""
+    try:
+        schedule = schedule_manager.get_schedule(instance_id)
+        if not schedule:
+            logger.warning(f"No schedule found for instance {instance_id}")
+            return
+        
+        # 获取当前实例状态
+        instances = await ec2_manager.get_instances_by_id([instance_id], states=['pending', 'running', 'stopping', 'stopped'])
+        if not instances:
+            logger.warning(f"Instance {instance_id} not found")
+            return
+        
+        current_state = instances[0]['State']['Name']
+        
+        # 检查是否应该停止
+        if schedule_manager.should_auto_stop(schedule, current_state):
+            await ec2_manager.stop_instances([instance_id])
+            logger.info(f"Auto-stopped instance {instance_id}")
+        else:
+            logger.info(f"Skipped auto-stop for instance {instance_id} (state: {current_state}, schedule state: {schedule.state})")
+            
+    except Exception as e:
+        logger.error(f"Error in auto_stop_instance for {instance_id}: {e}")
+
+# 初始化时加载所有现有的调度任务
+def init_existing_schedules():
+    """初始化现有的调度任务"""
+    try:
+        schedules = schedule_manager.get_active_schedules()
+        for schedule in schedules:
+            setup_schedule_jobs(schedule)
+        logger.info(f"Initialized {len(schedules)} existing schedules")
+    except Exception as e:
+        logger.error(f"Error initializing existing schedules: {e}")
+
+# 插件加载时初始化调度
+init_existing_schedules()
